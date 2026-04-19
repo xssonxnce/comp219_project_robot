@@ -5,8 +5,8 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
 
-    pkg_nav  = get_package_share_directory("navigation")
-    map_path = os.path.join(pkg_nav, "maps", "cafe_map")
+    pkg_nav  = get_package_share_directory("robot_navigation")
+    map_path = os.path.join(pkg_nav, "maps", "map")
 
     return LaunchDescription([
 
