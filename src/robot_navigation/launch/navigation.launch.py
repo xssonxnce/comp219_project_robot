@@ -1,143 +1,270 @@
 import os
-from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.actions import ExecuteProcess, TimerAction, SetEnvironmentVariable
 from launch_ros.actions import Node
-from launch.actions import SetEnvironmentVariable
+from ament_index_python.packages import get_package_share_directory
 import xacro
+from launch.actions import IncludeLaunchDescription
+from launch.actions import ExecuteProcess, TimerAction, SetEnvironmentVariable, DeclareLaunchArgument, IncludeLaunchDescription
+from launch.substitutions import LaunchConfiguration
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from nav2_common.launch import RewrittenYaml
 
 def generate_launch_description():
 
-    # define paths for gazebo, turtlebot, and world
-    pkg_ros_gz_sim = get_package_share_directory('ros_gz_sim')
-    pkg_robot_description = get_package_share_directory('robot_description')
-    pkg_robot_navigation = get_package_share_directory('robot_navigation')
-    
-    # get turtlebot
-    pkg_turtlebot = get_package_share_directory('turtlebot3_gazebo')
-    tb_model = os.getenv('TURTLEBOT3_MODEL','burger')
+    pkg_robot = get_package_share_directory("robot_description")
+    pkg_nav   = get_package_share_directory("robot_navigation")
+    pkg_tb3   = get_package_share_directory("turtlebot3_gazebo")
 
-    # define path to robot urdf file
-    urdf_file_name = f'turtlebot3_{tb_model}.urdf'
-    urdf_path = os.path.join(get_package_share_directory('turtlebot3_description'), 'urdf', urdf_file_name)
+    world_file = os.path.join(pkg_robot, "worlds", "map.sdf")
 
-    robot_desc = xacro.process_file(urdf_path).toxml()
-
-    
-    #get world and map
-    world_path = os.path.join(pkg_robot_description,'worlds','map.sdf')
-    map_path = os.path.join(pkg_robot_navigation,   "maps",   "map.yaml")
-
-
-    set_gz_resource_path = SetEnvironmentVariable(
-    name='GZ_SIM_RESOURCE_PATH',
-    value=[os.path.join(pkg_robot_description, 'worlds'), ':', 
-           os.path.join(get_package_share_directory('turtlebot3_description'),'models'),':',
-           os.path.join(pkg_turtlebot, 'models')]
+    urdf_file = os.path.join(
+    get_package_share_directory("turtlebot3_description"),
+    "urdf", "turtlebot3_burger.urdf" 
     )
+
+    # Process the file with xacro to resolve ${namespace}
+    robot_desc = xacro.process_file(urdf_file, mappings={'namespace': ''}).toxml()
+
+    map_yaml_file = LaunchConfiguration('map')
+    declare_map_yaml_cmd = DeclareLaunchArgument(
+        'map',
+        default_value=os.path.join(pkg_nav, 'maps','map.yaml'),
+        description='full path to map yaml file'
+    )
+    # Define missing gazebo plugin for model
+   # Define missing gazebo plugin for model
+    plugin_injection = """
+        <gazebo>
+            <plugin filename="gz-sim-joint-state-publisher-system" name="gz::sim::systems::JointStatePublisher">
+            <topic>/model/turtlebot3_burger/joint_states</topic>
+            </plugin>
+            <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
+            <left_joint>wheel_left_joint</left_joint>
+            <right_joint>wheel_right_joint</right_joint>
+            <wheel_separation>0.160</wheel_separation>
+            <wheel_radius>0.033</wheel_radius>
+            <topic>/model/turtlebot3_burger/cmd_vel</topic>
+            <odom_topic>/model/turtlebot3_burger/odometry</odom_topic>
+            <tf_topic>/model/turtlebot3_burger/tf</tf_topic>
+            <frame_id>odom</frame_id>
+            <child_frame_id>base_footprint</child_frame_id>
+            
+            <publish_odom>true</publish_odom>
+            <publish_odom_tf>true</publish_odom_tf>
+            <publish_wheel_tf>false</publish_wheel_tf>
+            <odom_publish_frequency>30</odom_publish_frequency>
+            </plugin>
+        </gazebo>
+      
+        <gazebo reference="base_scan">
+            <sensor name="hls_lfcd_lds" type="gpu_lidar">
+            <always_on>true</always_on>
+            <visualize>true</visualize>
+            <update_rate>10.0</update_rate>
+            <topic>/scan</topic>
+            <frame_id>base_scan</frame_id>
+            <lidar>
+                <scan>
+                <horizontal>
+                    <samples>120</samples>
+                    <resolution>1.000000</resolution>
+                    <min_angle>0.000000</min_angle>
+                    <max_angle>6.280000</max_angle>
+                </horizontal>
+                </scan>
+                <range>
+                <min>0.120000</min>
+                <max>3.5</max>
+                <resolution>0.015000</resolution>
+                </range>
+            </lidar>
+            </sensor>
+        </gazebo>
+        </robot>
+    """
+    robot_desc = robot_desc.replace('</robot>',plugin_injection)
     
-    # launch gazebo with map
-    gazebo_cmd = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(pkg_ros_gz_sim, 'launch', 'gz_sim.launch.py')
+    nav2_params_file = os.path.join(
+        get_package_share_directory('robot_navigation'),
+        'config',
+        'nav2_params.yaml'
+    )
+
+    # Dynamically inject use_sim_time into the default parameters
+    configured_params = RewrittenYaml(
+        source_file=nav2_params_file,
+        root_key='',
+        param_rewrites={'use_sim_time': 'true'},
+        convert_types=True
+    )
+    return LaunchDescription([
+
+        declare_map_yaml_cmd,
+
+
+        # Set TurtleBot3 model
+        SetEnvironmentVariable("TURTLEBOT3_MODEL", "burger"),
+
+        # Launch Gazebo with world
+        ExecuteProcess(
+            cmd=["gz", "sim", world_file],
+            #parameters=[{'use_sim_time':True}], # added this one
+            output="screen",
         ),
-        launch_arguments={'gz_args': f'-r {world_path}'}.items() # -r starts it running immediately
-    )
 
-    # Node - robot state publisher
-    state_publisher = Node(
-        package="robot_state_publisher",
-        executable="robot_state_publisher",
-        name="robot_state_publisher",
-        output="screen",
-        parameters=[{"robot_description": robot_desc, "use_sim_time": True}]
-    )
+        # Auto-unpause after 5 seconds
+        TimerAction(
+            period=5.0,
+            actions=[
+                ExecuteProcess(
+                    cmd=["gz", "service", "-s", "/world/map/control",
+                         "--reqtype", "gz.msgs.WorldControl",
+                         "--reptype", "gz.msgs.Boolean",
+                         "--timeout", "2000",
+                         "--req", "pause: false"],
+                    output="screen"
+                )
+            ]
+        ),
 
+        #Robot State Publisher
+        Node(
+            package="robot_state_publisher",
+            executable="robot_state_publisher",
+            name="robot_state_publisher",
+            output="screen",
+            parameters=[{"robot_description": robot_desc, "use_sim_time": True}],
+        ),
 
-    # Node - spawn robot
-    spawn_robot = Node(
-        package='ros_gz_sim',
-        executable='create',
-        arguments=[
-            '-file', os.path.join(pkg_turtlebot, 'models',f'turtlebot3_{tb_model}','model.sdf'),
-            '-name', 'turtlebot3_burger',
-            '-x', '0', '-y', '0', '-z', '0.05'
-        ],
-        output='screen'
+        # Spawn TurtleBot3 in cafe world
+        Node(
+            package="ros_gz_sim",
+            executable="create",
+            arguments=[
+                "-name", "turtlebot3_burger",
+                "-topic", "robot_description",
+                "-x", "0.0",
+                "-y", "0.0",
+                "-z", "0.1"
+            ],
+            parameters=[{'use_sim_time':True}], # added this one
+            output="screen",
+        ),
+
+        # ROS-GZ Bridge
         
-     
-    )
-
-   # 4. Node - ros-gz bridge 
-    bridge = Node(
-        package='ros_gz_bridge',
-        executable='parameter_bridge',
-        arguments=[
-            '/model/turtlebot3_burger/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
-            '/model/turtlebot3_burger/odometry@nav_msgs/msg/Odometry[gz.msgs.Odometry',
-            '/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist',
-            '/odom@nav_msgs/msg/Odometry@gz.msgs.Odometry',
-            '/scan@sensor_msgs/msg/LaserScan@gz.msgs.LaserScan',
-
-            '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'
-        ],
-        remappings=[('/model/turtlebot3_burger/tf', '/tf'),
-                    ('/model/turtlebot3_burger/odometry', '/odom'),
-                    ('/model/turtlebot3_burger/cmd_vel', '/cmd_vel'),
-                    ('/model/turtlebot3_burger/scan', '/scan'),
-        ],
-        parameters=[{'use_sim_time':True}],
-        output='screen'
-    )
-
-    # Node. map server
-    map_server = Node(
-        package="nav2_map_server",
-        executable="map_server",
-        name="map_server",
-        output="screen",
-        parameters=[{
-            "use_sim_time": True,
-            "yaml_filename": map_path
-        }]
-    )
-
-    amcl = Node(
-            package='nav2_amcl',
-            executable='amcl',
-            name='amcl',
-            output='screen',
-            parameters=[{
-                'use_sim_time':True,
-            }]
-
-    )
-
-    lifecycle_manager = Node(
-        package='nav2_lifecycle_manager',
-        executable='lifecycle_manager',
-        name='lifecycle_manager_navigation',
-        output='screen',
-        parameters=[{
-            'use_sim_time':True,
-            'autostart':True,
-            'node_names': ['map_server','amcl']
-        }]
-    )
+        Node(
+            package="ros_gz_bridge",
+            executable="parameter_bridge",
+            arguments=[
+                '/model/turtlebot3_burger/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
+                '/model/turtlebot3_burger/odometry@nav_msgs/msg/Odometry[gz.msgs.Odometry',
+                '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',                 
+                '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
+                '/model/turtlebot3_burger/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model',
+                '/model/turtlebot3_burger/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist'
+            ],
+            remappings=[
+                ('/model/turtlebot3_burger/tf', '/tf'),
+                ('/model/turtlebot3_burger/odometry', '/odom'),
+                ('/model/turtlebot3_burger/joint_states', '/joint_states'),
+                ('/model/turtlebot3_burger/cmd_vel', '/cmd_vel'),
+            ],
+            parameters=[{'use_sim_time':True}],
+            output='screen'
+            ),
     
-    
-    
-    ld = LaunchDescription()
+        
+        # 2. Add a NEW transform to connect Gazebo's stubborn Lidar frame name to the ROS URDF
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            arguments=[
+                '--x', '0', '--y', '0', '--z', '0',
+                '--yaw', '0', '--pitch', '0', '--roll', '0',
+                '--frame-id', 'base_scan',
+                '--child-frame-id', 'turtlebot3_burger/base_footprint/hls_lfcd_lds',
+                '--ros-args', '-p', 'use_sim_time:=true'
+            ]
+        ),
+        
 
-    ld.add_action(set_gz_resource_path)
-    ld.add_action(gazebo_cmd)
-    ld.add_action(state_publisher)
-    ld.add_action(spawn_robot)
-    ld.add_action(bridge)
-    ld.add_action(map_server)
-    ld.add_action(amcl)
-    ld.add_action(lifecycle_manager)
-    
-    return ld
+        # 1. Weld the TF tree back together (odom -> base_footprint -> base_link)
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            arguments=[
+                '--x', '0', '--y', '0', '--z', '0',
+                '--yaw', '0', '--pitch', '0', '--roll', '0',
+                '--frame-id', 'base_footprint',
+                '--child-frame-id', 'base_link',
+                '--ros-args', '-p', 'use_sim_time:=true'
+            ]
+        ),
+
+        # 2. Aesthetic Left Wheel Transform
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            arguments=[
+                '--x', '0', '--y', '0.08', '--z', '0.033',
+                '--yaw', '0', '--pitch', '0', '--roll', '0',
+                '--frame-id', 'base_link',
+                '--child-frame-id', 'wheel_left_link',
+                '--ros-args', '-p', 'use_sim_time:=true'
+            ]
+        ),
+
+        # 3. Aesthetic Right Wheel Transform
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            arguments=[
+                '--x', '0', '--y', '-0.08', '--z', '0.033',
+                '--yaw', '0', '--pitch', '0', '--roll', '0',
+                '--frame-id', 'base_link',
+                '--child-frame-id', 'wheel_right_link',
+                '--ros-args', '-p', 'use_sim_time:=true'
+            ]
+        ),
+        
+        
+        # 6. Localization (AMCL + Map Server)
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(
+                    get_package_share_directory("nav2_bringup"),
+                    "launch",
+                    "localization_launch.py"
+                )
+            ),
+            launch_arguments={
+                'use_sim_time': 'true',
+                'map': map_yaml_file,
+                'params_file': nav2_params_file
+            }.items()
+        ),
+        # 7. RViz2
+        Node(
+            package="rviz2",
+            executable="rviz2",
+            name="rviz2",
+            output="screen",
+            parameters=[{"use_sim_time": True}],
+        ),
+        # 8. Navigation Bringup
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(
+                    get_package_share_directory("nav2_bringup"),
+                    "launch",
+                    "navigation_launch.py" # Use navigation_launch.py since you are using SLAM for mapping
+                )
+            ),
+            launch_arguments={
+                'use_sim_time': 'true',
+                'params_file': nav2_params_file # Pass the params you defined at the top
+            }.items()
+        ),
+    ])
