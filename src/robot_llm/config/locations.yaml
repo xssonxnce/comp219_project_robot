@@ -1,0 +1,10 @@
+locations:
+  kitchen:
+    x: 3.5
+    y: 3.5
+    yaw: 0.0
+
+  office:
+    x: -2.5
+    y: 3.0
+    yaw: 1.57
